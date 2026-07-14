@@ -10,6 +10,55 @@ Core DocuBot class responsible for:
 import os
 import glob
 
+
+# Common words that carry little meaning for retrieval. Ignoring them keeps a
+# query like "Is there any mention of payment processing?" from matching docs
+# on filler words alone, which is what powers the refusal guardrail.
+STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "am",
+    "do", "does", "did", "how", "what", "which", "where", "when", "who",
+    "why", "to", "of", "in", "on", "for", "and", "or", "any", "there",
+    "this", "that", "these", "those", "i", "you", "it", "with", "as",
+    "at", "by", "from", "into", "about", "can", "could", "should", "would",
+    "my", "me", "we", "us", "our", "your", "mention", "docs",
+}
+
+
+def tokenize(text):
+    """
+    Split text into lowercase word tokens, stripping surrounding punctuation.
+    Keeps things simple: whitespace split, then trim non-alphanumeric edges.
+    """
+    tokens = []
+    for raw in text.lower().split():
+        word = raw.strip(".,:;!?()[]{}<>\"'`/\\|#*")
+        if word:
+            tokens.append(word)
+    return tokens
+
+
+def query_terms(query):
+    """
+    Meaningful query words: tokens minus stopwords. These are the words we
+    actually score against, so filler words cannot create false matches.
+    """
+    return {word for word in tokenize(query) if word not in STOPWORDS}
+
+
+def split_into_snippets(text):
+    """
+    Break a document into smaller pieces so retrieval can return precise
+    sections instead of whole files. We split on blank lines (paragraphs),
+    trim whitespace, and drop empty pieces.
+    """
+    snippets = []
+    for block in text.split("\n\n"):
+        block = block.strip()
+        if block:
+            snippets.append(block)
+    return snippets
+
+
 class DocuBot:
     def __init__(self, docs_folder="docs", llm_client=None):
         """
@@ -64,7 +113,11 @@ class DocuBot:
         ignore punctuation if needed.
         """
         index = {}
-        # TODO: implement simple indexing
+        for filename, text in documents:
+            for word in set(tokenize(text)):
+                index.setdefault(word, [])
+                if filename not in index[word]:
+                    index[word].append(filename)
         return index
 
     # -----------------------------------------------------------
@@ -81,18 +134,36 @@ class DocuBot:
         - Count how many appear in the text
         - Return the count as the score
         """
-        # TODO: implement scoring
-        return 0
+        query_words = query_terms(query)
+        text_words = tokenize(text)
 
-    def retrieve(self, query, top_k=3):
-        """
-        TODO (Phase 1):
-        Use the index and scoring function to select top_k relevant document snippets.
+        score = 0
+        for word in text_words:
+            if word in query_words:
+                score += 1
+        return score
 
-        Return a list of (filename, text) sorted by score descending.
+    def retrieve(self, query, top_k=3, min_score=1):
         """
-        results = []
-        # TODO: implement retrieval logic
+        Select the top_k most relevant snippets for a query.
+
+        Documents are split into small snippets (paragraphs), each snippet is
+        scored, and only snippets scoring at least min_score are kept. If none
+        clear that bar we return an empty list, which the answer methods turn
+        into an "I do not know" refusal (the guardrail).
+
+        Returns a list of (filename, snippet_text) sorted by score descending.
+        """
+        scored = []
+        for filename, text in self.documents:
+            for snippet in split_into_snippets(text):
+                score = self.score_document(query, snippet)
+                if score >= min_score:
+                    scored.append((score, filename, snippet))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+        results = [(filename, snippet) for _, filename, snippet in scored]
         return results[:top_k]
 
     # -----------------------------------------------------------
